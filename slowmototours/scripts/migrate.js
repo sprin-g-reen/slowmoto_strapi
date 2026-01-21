@@ -8,6 +8,7 @@ const WP_API_URL = 'https://slowmoto.tours/wp-json/wp/v2';
 const STRAPI_API_URL = 'http://localhost:1337/api';
 // Ideally, use a token. If not provided, we rely on Public permissions.
 const STRAPI_TOKEN = process.env.STRAPI_TOKEN || '';
+const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT, 10) : null;
 
 const axiosConfig = {
   headers: STRAPI_TOKEN ? { Authorization: `Bearer ${STRAPI_TOKEN}` } : {},
@@ -17,14 +18,19 @@ const axiosConfig = {
 const categoryMap = new Map();
 const imageMap = new Map(); // URL -> Strapi ID
 
-async function fetchAll(endpoint) {
+async function fetchAll(endpoint, limit = null) {
   let page = 1;
   let allResults = [];
   while (true) {
     console.log(`Fetching ${endpoint} page ${page}...`);
     try {
-      const res = await axios.get(`${WP_API_URL}/${endpoint}?page=${page}&per_page=100`);
+      const perPage = limit && limit < 100 ? limit : 100;
+      const res = await axios.get(`${WP_API_URL}/${endpoint}?page=${page}&per_page=${perPage}`);
       allResults = allResults.concat(res.data);
+      if (limit && allResults.length >= limit) {
+        allResults = allResults.slice(0, limit);
+        break;
+      }
       if (page >= res.headers['x-wp-totalpages']) break;
       page++;
     } catch (e) {
@@ -69,7 +75,7 @@ async function uploadImageAndGetUrl(imageUrl) {
 
 async function migrateCategories() {
   console.log('Migrating Categories...');
-  const categories = await fetchAll('categories');
+  const categories = await fetchAll('categories', LIMIT);
   for (const cat of categories) {
     try {
       const res = await axios.post(`${STRAPI_API_URL}/categories`, {
@@ -80,8 +86,11 @@ async function migrateCategories() {
           wp_id: cat.id
         }
       }, axiosConfig);
-      categoryMap.set(cat.id, res.data.data.id);
-      console.log(`Created Category: ${cat.name}`);
+      console.log(`Created Category response for ${cat.name}:`, JSON.stringify(res.data, null, 2));
+      // Store documentId if available, else id
+      const catId = res.data.data.documentId || res.data.data.id;
+      categoryMap.set(cat.id, catId);
+      console.log(`Created Category: ${cat.name}, ID mapped: ${catId}`);
     } catch (e) {
       console.error(`Failed to create category ${cat.name}:`, e.message);
     }
@@ -90,7 +99,7 @@ async function migrateCategories() {
 
 async function migratePosts() {
   console.log('Migrating Posts (Articles)...');
-  const posts = await fetchAll('posts');
+  const posts = await fetchAll('posts', LIMIT);
   for (const post of posts) {
     const featuredMediaUrl = post._links['wp:featuredmedia'] ?
       (await axios.get(post._links['wp:featuredmedia'][0].href).catch(() => ({data:{source_url:null}}))).data.source_url
@@ -130,23 +139,29 @@ async function migratePosts() {
 
     // Map Categories
     const catIds = post.categories.map(id => categoryMap.get(id)).filter(id => id);
+    console.log(`Article Category IDs for ${post.title.rendered}:`, catIds);
 
     try {
+      const articleData = {
+        title: post.title.rendered,
+        slug: post.slug,
+        description: post.excerpt.rendered.replace(/<[^>]*>?/gm, '').slice(0, 80),
+        cover: coverId,
+        blocks: [
+            {
+                __component: 'shared.rich-text',
+                body: content
+            }
+        ],
+        wp_id: post.id
+      };
+
+      if (catIds.length > 0) {
+          articleData.category = catIds[0];
+      }
+
       await axios.post(`${STRAPI_API_URL}/articles`, {
-        data: {
-          title: post.title.rendered,
-          slug: post.slug,
-          description: post.excerpt.rendered.replace(/<[^>]*>?/gm, '').slice(0, 80),
-          cover: coverId,
-          category: catIds.length > 0 ? catIds[0] : null,
-          blocks: [
-              {
-                  __component: 'shared.rich-text',
-                  body: content
-              }
-          ],
-          wp_id: post.id
-        }
+        data: articleData
       }, axiosConfig);
       console.log(`Created Article: ${post.title.rendered}`);
     } catch (e) {
@@ -157,7 +172,7 @@ async function migratePosts() {
 
 async function migratePages() {
   console.log('Migrating Pages...');
-  const pages = await fetchAll('pages');
+  const pages = await fetchAll('pages', LIMIT);
 
   for (const page of pages) {
     const isTour = /Tour Duration:/i.test(page.content.rendered) || /Total Distance:/i.test(page.content.rendered);
