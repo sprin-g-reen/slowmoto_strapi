@@ -136,7 +136,7 @@ async function migratePosts() {
         data: {
           title: post.title.rendered,
           slug: post.slug,
-          description: post.excerpt.rendered.replace(/<[^>]*>?/gm, '').slice(0, 160),
+          description: post.excerpt.rendered.replace(/<[^>]*>?/gm, '').slice(0, 80),
           cover: coverId,
           category: catIds.length > 0 ? catIds[0] : null,
           blocks: [
